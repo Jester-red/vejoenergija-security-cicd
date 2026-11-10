@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets and environment variables
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Local scan results
+results/
+*.log
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# Operating system
+.DS_Store
+Thumbs.db

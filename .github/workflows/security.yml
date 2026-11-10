@@ -1,0 +1,46 @@
+name: VejoEnergija Security CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: Security checks and Docker build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install bandit pip-audit
+
+      - name: Python security scan - Bandit
+        run: |
+          bandit -r app.py -ll
+
+      - name: Dependency vulnerability scan
+        run: |
+          pip-audit -r requirements.hardened.txt
+
+      - name: Verify Python syntax
+        run: |
+          python -m py_compile app.py
+
+      - name: Build hardened Docker image
+        run: |
+          docker build \
+            -f Dockerfile.hardened \
+            -t vejoenergija-security-portal:ci .
