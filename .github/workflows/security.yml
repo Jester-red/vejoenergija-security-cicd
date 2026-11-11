@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install security tools
+      - name: Install Python security tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install bandit pip-audit
@@ -31,16 +31,64 @@ jobs:
         run: |
           bandit -r . -ll
 
-      - name: Dependency vulnerability scan
+      - name: Dependency vulnerability scan - pip-audit
         run: |
           pip-audit -r requirements.hardened.txt
 
       - name: Verify Python syntax
         run: |
-          python -m py_compile app.py
+          python -m py_compile app.py security_demo.py
+
+      - name: Static Dockerfile scan - Checkov
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "$PWD:/src:ro" \
+            bridgecrew/checkov:latest \
+            --file /src/Dockerfile.hardened \
+            --framework dockerfile \
+            --compact
 
       - name: Build hardened Docker image
         run: |
           docker build \
             -f Dockerfile.hardened \
             -t vejoenergija-security-portal:ci .
+
+      - name: Container vulnerability scan - Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: vejoenergija-security-portal:ci
+          scanners: vuln
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: "0"
+
+      - name: Secret scan - Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          exit-code: "1"
+
+      - name: Generate CycloneDX SBOM - Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: vejoenergija-security-portal:ci
+          format: cyclonedx-json
+          output-file: sbom-cyclonedx.json
+          artifact-name: vejoenergija-sbom
+          upload-artifact: true
+
+      - name: Upload Trivy vulnerability report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vejoenergija-trivy-results
+          path: trivy-results.json
+          if-no-files-found: ignore
+          retention-days: 7
