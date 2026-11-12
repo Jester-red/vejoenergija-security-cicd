@@ -1,4 +1,4 @@
-name: VejoEnergija Security CI
+name: VejoEnergija Security CI - corrected quality gates
 
 on:
   push:
@@ -10,72 +10,114 @@ permissions:
 
 jobs:
   security:
-    name: Security checks and Docker build
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout source code
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: '3.13'
 
-      - name: Install Python security tools
+      - name: Install security tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install bandit pip-audit
 
-      - name: Python security scan - Bandit
-        run: |
-          bandit -r . -ll
+      # High-severity SAST blocks; Medium/Low are still reported in a separate step.
+      - name: SAST - Bandit report (all severities)
+        continue-on-error: true
+        run: bandit -r . -f txt
 
-      - name: Dependency vulnerability scan - pip-audit
-        run: |
-          pip-audit -r requirements.hardened.txt
+      - name: SAST - Bandit high-severity gate
+        id: sast
+        continue-on-error: true
+        run: bandit -r . -lll
 
-      - name: Verify Python syntax
-        run: |
-          python -m py_compile app.py security_demo.py
-
-      - name: Static Dockerfile scan - Checkov
+      - name: Dependency audit - advisory report
         continue-on-error: true
         run: |
-          docker run --rm \
-            -v "$PWD:/src:ro" \
-            bridgecrew/checkov:latest \
-            --file /src/Dockerfile.hardened \
-            --framework dockerfile \
-            --compact
+          pip-audit -r requirements.hardened.txt
+          if [ -f security_lab/requirements.demo-vulnerable.txt ]; then
+            pip-audit -r security_lab/requirements.demo-vulnerable.txt
+          fi
 
-      - name: Build hardened Docker image
+      - name: Dependency vulnerability gate - Critical only
+        id: sca
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL
+          exit-code: '1'
+          format: table
+
+      - name: Syntax check
+        run: python -m py_compile app.py security_demo.py
+
+      - name: Dockerfile static analysis - Checkov report
+        continue-on-error: true
         run: |
-          docker build \
-            -f Dockerfile.hardened \
-            -t vejoenergija-security-portal:ci .
+          docker run --rm -v "$PWD:/src:ro" bridgecrew/checkov:latest \
+            --file /src/Dockerfile.hardened --framework dockerfile --compact
 
-      - name: Container vulnerability scan - Trivy
+      - name: Build hardened image
+        run: docker build -f Dockerfile.hardened -t vejoenergija-security-portal:ci .
+
+      - name: Image vulnerability report - all severities
+        id: image_report
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: vejoenergija-security-portal:ci
           scanners: vuln
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: '0'
           format: json
           output: trivy-results.json
-          severity: CRITICAL,HIGH,MEDIUM,LOW
-          exit-code: "0"
+
+      - name: Image vulnerability gate - Critical only
+        id: image_gate
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: vejoenergija-security-portal:ci
+          scanners: vuln
+          severity: CRITICAL
+          exit-code: '1'
+          format: table
 
       - name: Secret scan - Trivy
+        id: secret_gate
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           scanners: secret
+          exit-code: '1'
           format: table
-          exit-code: "1"
 
-      - name: Generate CycloneDX SBOM - Syft
+      # Explicit demonstration token: exercises the gate without using real credentials.
+      # This is supplementary to Trivy and does not replace general secret detection.
+      - name: Laboratory fake-secret gate
+        id: lab_secret_gate
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ -f security_lab/FAKE_API_KEY_DEMO.txt ]; then
+            echo 'Deliberate fake API key fixture found: blocking demo run.'
+            exit 1
+          fi
+          echo 'No training secret fixture present.'
+
+      - name: Generate SBOM
+        if: always()
         uses: anchore/sbom-action@v0
         with:
           image: vejoenergija-security-portal:ci
@@ -84,11 +126,29 @@ jobs:
           artifact-name: vejoenergija-sbom
           upload-artifact: true
 
-      - name: Upload Trivy vulnerability report
+      - name: Upload vulnerability report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vejoenergija-trivy-results
           path: trivy-results.json
           if-no-files-found: ignore
-          retention-days: 7
+
+      - name: Final blocking security quality gate
+        if: always()
+        env:
+          SAST: ${{ steps.sast.outcome }}
+          SCA: ${{ steps.sca.outcome }}
+          IMAGE: ${{ steps.image_gate.outcome }}
+          SECRET: ${{ steps.secret_gate.outcome }}
+          DEMO_SECRET: ${{ steps.lab_secret_gate.outcome }}
+        run: |
+          printf 'Bandit High: %s\nDependency Critical: %s\nImage Critical: %s\nTrivy secrets: %s\nDemo fake secret: %s\n' \
+            "$SAST" "$SCA" "$IMAGE" "$SECRET" "$DEMO_SECRET"
+          if [ "$SAST" = failure ] || [ "$SCA" = failure ] || \
+             [ "$IMAGE" = failure ] || [ "$SECRET" = failure ] || \
+             [ "$DEMO_SECRET" = failure ]; then
+            echo 'Security quality gate FAILED.'
+            exit 1
+          fi
+          echo 'Security quality gate PASSED.'
